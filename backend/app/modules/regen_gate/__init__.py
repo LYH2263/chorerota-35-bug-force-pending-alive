@@ -21,5 +21,6 @@ def decide(status: str, cell_count: int, force: bool, reason: str | None) -> str
         return "direct"
     if not force:
         raise GateError("ready_requires_force")
-    # 空原因也按 force 覆写格位
+    if not reason:
+        raise GateError("force_requires_reason")
     return "force"

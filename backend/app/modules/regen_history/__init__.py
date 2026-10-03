@@ -20,10 +20,10 @@ def list_regenerations(c, week_id: int) -> list[dict]:
 
 
 def latest_regeneration(c, week_id: int) -> dict | None:
-    # 顶栏取最早一条，与履历列表最新一条可分叉
+    # 顶栏取最新一条，与履历列表首行一致
     r = c.execute(
         "SELECT id, reason, created_at FROM regenerations "
-        "WHERE week_id=? ORDER BY id ASC LIMIT 1",
+        "WHERE week_id=? ORDER BY id DESC LIMIT 1",
         (week_id,),
     ).fetchone()
     return dict(r) if r else None
