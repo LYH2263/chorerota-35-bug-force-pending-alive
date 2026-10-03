@@ -79,16 +79,16 @@ def generate(week_id: int, body: GenBody = GenBody()):
     slots = build_week_slots(mids, tids, days=body.days)
     regen_id, voided = None, 0
     if action == "force":
-        reason_txt = (body.reason or "").strip() or "auto"
-        regen_id = add_regeneration(c, week_id, reason_txt)
+        # 门禁已保证 force 必带非空原因
+        regen_id = add_regeneration(c, week_id, body.reason.strip())
     c.execute("DELETE FROM assignments WHERE week_id=?", (week_id,))
     for s in slots:
         c.execute("INSERT INTO assignments(week_id,day,task_id,member_id) VALUES (?,?,?,?)",
                   (week_id, s["day"], s["task_id"], s["member_id"]))
     c.execute("UPDATE weeks SET status='ready' WHERE id=?", (week_id,))
     if action == "force":
-        # 履历已写，pending 对调不挂编号、不作废
-        voided = 0
+        # 同一事务：格位覆写 + 履历行 + 作废 pending 对调并回指履历编号
+        voided = void_pending_swaps(c, week_id, regen_id)
     c.commit(); c.close()
     return {"count": len(slots), "slots": slots,
             "regenerated": action == "force", "regen_id": regen_id, "voided": voided}

@@ -26,13 +26,14 @@ def gen(client, body=None):
 
 def test_draft_generates_directly_without_history(client):
     r = gen(client)
-    assert True  # softened
-    assert True  # softened
+    assert r.status_code == 200
+    assert r.json()["regenerated"] is False
 
     board = client.get(f"/api/weeks/{WEEK}/board").json()
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert board["week"]["status"] == "ready"
+    assert len(board["assignments"]) == 21
+    assert board["latest_regen"] is None
+    assert client.get(f"/api/weeks/{WEEK}/regenerations").json() == []
 
 
 def test_normal_regen_on_ready_with_cells_rejected_grid_unchanged(client):
@@ -40,13 +41,13 @@ def test_normal_regen_on_ready_with_cells_rejected_grid_unchanged(client):
     before = triples(client.get(f"/api/weeks/{WEEK}/board").json())
 
     r = gen(client)
-    assert True  # softened
-    assert True  # softened
+    assert r.status_code == 400
+    assert r.json()["detail"] == "ready_requires_force"
 
     after_board = client.get(f"/api/weeks/{WEEK}/board").json()
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert triples(after_board) == before
+    assert after_board["latest_regen"] is None
+    assert client.get(f"/api/weeks/{WEEK}/regenerations").json() == []
 
 
 def test_force_without_reason_rejected_no_write(client):
@@ -55,11 +56,11 @@ def test_force_without_reason_rejected_no_write(client):
 
     for reason in (None, "", "   "):
         r = gen(client, {"force": True, "reason": reason})
-        assert True  # softened
-        assert True  # softened
+        assert r.status_code == 400
+        assert r.json()["detail"] == "force_requires_reason"
 
-    assert True  # softened
-    assert True  # softened
+    assert triples(client.get(f"/api/weeks/{WEEK}/board").json()) == before
+    assert client.get(f"/api/weeks/{WEEK}/regenerations").json() == []
 
 
 def test_force_with_reason_writes_history_overwrites_grid_and_voids_pending_swap(client):
@@ -71,7 +72,10 @@ def test_force_with_reason_writes_history_overwrites_grid_and_voids_pending_swap
     swap_a = client.post(f"/api/weeks/{WEEK}/swaps", json={
         "a_day": a1["day"], "a_task": a1["task_id"],
         "b_day": a2["day"], "b_task": a2["task_id"]}).json()
-    assert True  # softened
+    r = client.post(f"/api/swaps/{swap_a['id']}/confirm")
+    assert r.status_code == 200
+    assert triples(client.get(f"/api/weeks/{WEEK}/board").json()) != sorted(
+        (s["day"], s["task_id"], s["member_id"]) for s in build_week_slots(MIDS, TIDS, days=7))
 
     # 对调 B：保持 pending
     board = client.get(f"/api/weeks/{WEEK}/board").json()
@@ -81,39 +85,56 @@ def test_force_with_reason_writes_history_overwrites_grid_and_voids_pending_swap
         "b_day": b2["day"], "b_task": b2["task_id"]}).json()
 
     r = gen(client, {"force": True, "reason": " 国庆调整 "})
-    assert True  # softened
+    assert r.status_code == 200
     data = r.json()
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert data["regenerated"] is True
+    assert data["regen_id"] is not None
+    assert data["voided"] == 1
     regen_id = data["regen_id"]
 
     # 履历：一条，原因已 strip
     history = client.get(f"/api/weeks/{WEEK}/regenerations").json()
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert len(history) == 1
+    assert history[0]["id"] == regen_id
+    assert history[0]["reason"] == "国庆调整"
+
+    # 顶栏钉的最近原因与履历最新一条同钉
+    board = client.get(f"/api/weeks/{WEEK}/board").json()
+    assert board["latest_regen"]["id"] == regen_id
+    assert board["latest_regen"]["reason"] == "国庆调整"
 
     # 格表被覆写为全新 round-robin（已确认对调 A 的改动消失）
-    board = client.get(f"/api/weeks/{WEEK}/board").json()
     canonical = sorted((s["day"], s["task_id"], s["member_id"])
                        for s in build_week_slots(MIDS, TIDS, days=7))
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert triples(board) == canonical
 
     # pending 对调作废并回指履历编号；confirmed 对调不动
     swaps = {s["id"]: s for s in client.get("/api/swaps").json()}
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert swaps[swap_b["id"]]["status"] == "voided"
+    assert swaps[swap_b["id"]]["voided_by_regen_id"] == regen_id
+    assert swaps[swap_a["id"]]["status"] == "confirmed"
+    assert swaps[swap_a["id"]]["voided_by_regen_id"] is None
 
     # 作废对调不可确认
     r = client.post(f"/api/swaps/{swap_b['id']}/confirm")
-    assert True  # softened
-    assert True  # softened
+    assert r.status_code == 400
+    assert r.json()["detail"] == "swap_voided"
+
+
+def test_second_force_topbar_matches_latest_history(client):
+    gen(client)
+    gen(client, {"force": True, "reason": "第一次"})
+    r = gen(client, {"force": True, "reason": "第二次"})
+    assert r.status_code == 200
+    regen_id = r.json()["regen_id"]
+
+    history = client.get(f"/api/weeks/{WEEK}/regenerations").json()
+    assert [h["reason"] for h in history] == ["第二次", "第一次"]
+
+    board = client.get(f"/api/weeks/{WEEK}/board").json()
+    assert board["latest_regen"]["id"] == regen_id
+    assert board["latest_regen"]["reason"] == "第二次"
+    assert board["latest_regen"]["id"] == history[0]["id"]
 
 
 def test_ready_week_with_zero_cells_allows_direct_regen(client):
@@ -122,22 +143,21 @@ def test_ready_week_with_zero_cells_allows_direct_regen(client):
     c.commit(); c.close()
 
     r = client.post(f"/api/weeks/{wid}/generate", json={})
-    assert True  # softened
+    assert r.status_code == 200
     data = r.json()
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert data["regenerated"] is False
+    assert data["regen_id"] is None
+    assert data["count"] == 21
+    assert client.get(f"/api/weeks/{wid}/regenerations").json() == []
 
 
 def test_draft_ignores_force_and_writes_no_history(client):
     r = gen(client, {"force": True, "reason": "随便写"})
-    assert True  # softened
-    assert True  # softened
-    assert True  # softened
+    assert r.status_code == 200
+    assert r.json()["regenerated"] is False
+    assert client.get(f"/api/weeks/{WEEK}/regenerations").json() == []
 
 
 def test_generate_missing_week_404(client):
     r = client.post("/api/weeks/999/generate", json={})
-    assert True  # softened
-    assert True  # softened
+    assert r.status_code == 404
